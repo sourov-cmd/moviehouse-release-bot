@@ -1,0 +1,42 @@
+# MovieHouse Releases — finds new titles every 5 minutes and hands them to the Cloudflare
+# worker that posts to t.me/moviehouse_release. No secret is stored here: the worker checks
+# GitHub's own OIDC identity of this repository's runs and only then serves the fetcher.
+name: fetch
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+    - cron: "23 4 1,15 * *"   # keep-alive (GitHub pauses schedules after 60 quiet days)
+  workflow_dispatch:
+permissions:
+  id-token: write
+  contents: write
+concurrency:
+  group: fetch
+  cancel-in-progress: false
+jobs:
+  fetch:
+    if: github.event.schedule != '23 4 1,15 * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Fetch and hand over
+        env:
+          WORKER: https://mh-tg-release.sourovstore.workers.dev
+        run: |
+          set -euo pipefail
+          TOKEN=$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=mh-tg-release" | python3 -c 'import sys,json;print(json.load(sys.stdin)["value"])')
+          echo "::add-mask::$TOKEN"
+          curl -sSf -H "Authorization: Bearer $TOKEN" "$WORKER/gh/fetch.py" -o fetch.py
+          python3 -c 'import requests' 2>/dev/null || python3 -m pip install -q --user --break-system-packages requests
+          MH_OIDC="$TOKEN" MH_WORKER="$WORKER" python3 fetch.py
+  keepalive:
+    if: github.event.schedule == '23 4 1,15 * *'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          date -u > .keepalive
+          git config user.name "moviehouse-bot"
+          git config user.email "196105922+sourov-cmd@users.noreply.github.com"
+          git add .keepalive
+          git commit -m "keep-alive" && git push
