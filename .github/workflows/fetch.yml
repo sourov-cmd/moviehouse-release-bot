@@ -16,6 +16,7 @@ on:
 permissions:
   id-token: write
   contents: write
+  actions: write
 concurrency:
   group: fetch
   cancel-in-progress: false
