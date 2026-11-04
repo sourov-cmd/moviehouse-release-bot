@@ -1,10 +1,16 @@
-# MovieHouse Releases — finds new titles every 5 minutes and hands them to the Cloudflare
-# worker that posts to t.me/moviehouse_release. No secret is stored here: the worker checks
-# GitHub's own OIDC identity of this repository's runs and only then serves the fetcher.
+# MovieHouse Releases — finds new titles and hands them to the Cloudflare worker that posts
+# to t.me/moviehouse_release. No secret is stored here: the worker checks GitHub's own OIDC
+# identity of this repository's runs and only then serves the fetcher.
+#
+# 2026-11-04: GitHub throttles the 5-minute schedule on this public repo to one run every
+# 2.5-10 h (measured over 30 runs), so a run that finds nothing new would leave the next
+# fetch up to 10 h away. The run now chains the next one itself (workflow_dispatch, which
+# GitHub does not throttle) after a 5-minute wait, exactly as the Library sync does. The
+# schedule stays as a backstop and a keep-alive, and the concurrency group queues overlaps.
 name: fetch
 on:
   schedule:
-    - cron: "1-59/5 * * * *"   # every 5 min, off the busy :00 mark
+    - cron: "1-59/5 * * * *"   # backstop: every 5 min, off the busy :00 mark
     - cron: "23 4 1,15 * *"   # keep-alive (GitHub pauses schedules after 60 quiet days)
   workflow_dispatch:
 permissions:
@@ -29,6 +35,25 @@ jobs:
           curl -sSf -H "Authorization: Bearer $TOKEN" "$WORKER/gh/fetch.py" -o fetch.py
           python3 -c 'import requests' 2>/dev/null || python3 -m pip install -q --user --break-system-packages requests
           MH_OIDC="$TOKEN" MH_WORKER="$WORKER" python3 fetch.py
+      # The schedule on this repo fires every 2.5-10 h, not every 5 min (measured 2026-11-04).
+      # A dispatch is not throttled, so the next run is started here, 5 minutes after this one
+      # began. The concurrency group queues it if this run is still going; the schedule stays
+      # as a backstop. A failed fetch still chains, so the bot never goes silent again.
+      - name: Chain the next run
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sleep 300
+          for i in 1 2 3 4 5; do
+            if gh workflow run fetch.yml --repo "$GITHUB_REPOSITORY" --ref main; then
+              echo "next fetch chained"
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "could not chain the next fetch; the schedule will pick it up" >&2
   keepalive:
     if: github.event.schedule == '23 4 1,15 * *'
     runs-on: ubuntu-latest
